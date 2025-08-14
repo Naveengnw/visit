@@ -14,16 +14,22 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors()); // Enable Cross-Origin Resource Sharing
 app.use(express.json()); // To parse JSON bodies
-app.use(express.static(path.join(__dirname, 'public'))); // Serve static files (HTML, CSS, JS) from the 'public' directory
+app.use(express.urlencoded({ extended: true })); // To parse form data
 
-// Serve uploaded images and geojson files statically
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-app.use('/geojson', express.static(path.join(__dirname, 'uploads')));
+// Serve static files (HTML, CSS, JS) from the 'public' directory
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Create and serve the 'uploads' directory for images and geojson files
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
+app.use('/uploads', express.static(uploadDir));
+app.use('/geojson', express.static(uploadDir));
 
 
 // 3. CONFIGURE DATABASE CONNECTION
 // IMPORTANT: Replace these with your actual database credentials.
-// It is highly recommended to use environment variables for this in a real project.
 const pool = new Pool({
   user: 'your_db_user',       // e.g., 'postgres'
   host: 'localhost',
@@ -33,25 +39,16 @@ const pool = new Pool({
 });
 
 // 4. CONFIGURE FILE UPLOADS (Multer)
-// Create the 'uploads' directory if it doesn't exist
-const uploadDir = 'uploads';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
-
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadDir); // Save files to the 'uploads' directory
   },
   filename: (req, file, cb) => {
     // Use a timestamp to ensure unique filenames
-    cb(null, Date.now() + '-' + file.originalname);
+    cb(null, Date.now() + '-' + path.extname(file.originalname));
   }
 });
 const upload = multer({ storage: storage });
-
-// A simple variable to keep track of the last uploaded GeoJSON
-let lastUploadedGeoJSON = null;
 
 
 // 5. DEFINE API ROUTES WITH ERROR HANDLING
@@ -70,7 +67,6 @@ app.get('/api/assets', async (req, res) => {
 // --- POST: Upload a single new asset ---
 app.post('/api/assets', upload.single('dataFile'), async (req, res) => {
   const { name, category, description, lat, lng } = req.body;
-  // The path to the uploaded image, accessible by the browser
   const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
 
   if (!name || !category || !description || !lat || !lng) {
@@ -92,6 +88,34 @@ app.post('/api/assets', upload.single('dataFile'), async (req, res) => {
   }
 });
 
+// --- POST: Upload a GeoJSON file ---
+// We will save the name of the last uploaded file for persistence.
+app.post('/api/geojson-upload', upload.single('geojsonFile'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No GeoJSON file uploaded.' });
+  }
+  
+  // Save the filename to a simple config file so we remember it after a server restart
+  const config = { lastUploadedGeoJSON: req.file.filename };
+  fs.writeFileSync(path.join(__dirname, 'last_upload.json'), JSON.stringify(config));
+
+  res.status(200).json({
+    message: 'GeoJSON file uploaded successfully.',
+    filename: req.file.filename
+  });
+});
+
+// --- GET: Get the filename of the last uploaded GeoJSON ---
+app.get('/api/last-uploaded-geojson', (req, res) => {
+    const configPath = path.join(__dirname, 'last_upload.json');
+    if (fs.existsSync(configPath)) {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        res.json({ filename: config.lastUploadedGeoJSON });
+    } else {
+        // If no file has ever been uploaded, return nothing.
+        res.status(404).json({ error: 'No GeoJSON file has been uploaded yet.' });
+    }
+});
 
 // --- GET: Gap analysis (count of assets by category) ---
 app.get('/api/gap-analysis', async (req, res) => {
@@ -107,32 +131,8 @@ app.get('/api/gap-analysis', async (req, res) => {
 
     res.json(analysis);
   } catch (err) {
-    // This is the fix for your 500 error. It logs the real error and sends a clean response.
     console.error('ERROR FETCHING GAP ANALYSIS:', err);
     res.status(500).json({ error: 'Failed to retrieve gap analysis.' });
-  }
-});
-
-// --- POST: Upload a GeoJSON file ---
-app.post('/api/geojson-upload', upload.single('geojsonFile'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No GeoJSON file uploaded.' });
-  }
-  // Store the filename to be retrieved by the assets page
-  lastUploadedGeoJSON = req.file.filename;
-  res.status(200).json({
-    message: 'GeoJSON file uploaded successfully.',
-    filename: lastUploadedGeoJSON
-  });
-});
-
-// --- GET: Get the filename of the last uploaded GeoJSON ---
-app.get('/api/last-uploaded-geojson', (req, res) => {
-  if (lastUploadedGeoJSON) {
-    res.json({ filename: lastUploadedGeoJSON });
-  } else {
-    // If no file has been uploaded yet, send back nothing or a default
-    res.status(404).json({ error: 'No GeoJSON file has been uploaded yet.' });
   }
 });
 
